@@ -1,1 +1,1 @@
-# MinFa-RAG-flash
+# MinFa-RAG-Flash
