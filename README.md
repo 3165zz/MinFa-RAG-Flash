@@ -155,7 +155,7 @@ flowchart TD
 - [ ] **v3 效果与性能优化**：查询改写、混合检索（BM25 + 向量）、重排序；检索结果 LRU 缓存（命中免检索）；引入 LangChain 重构检索链
 
 - [ ] **v4 评测验证**：自建评测题集，Flash vs 旗舰模型横向对比，产出性能报告
-- [　] **v5 Agent 化**（未确定）：基于 LangGraph 将 RAG 封装为工具，接入 Multi-Agent 系统（这可能是我下一个项目的方向）
+- [ ] **v5 Agent 化**（未确定）：基于 LangGraph 将 RAG 封装为工具，接入 Multi-Agent 系统（这可能是我下一个项目的方向）
 
 ## 🤝 贡献
 
