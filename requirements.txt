@@ -1,0 +1,8 @@
+# Meta 开源的向量相似度搜索库
+faiss-cpu==1.15.1
+# 文本向量化库（依赖 torch / transformers）
+sentence-transformers==6.1.0
+# 从 .env 读取环境变量
+python-dotenv==1.2.4
+# 阿里云百炼 DashScope SDK
+dashscope==1.27.7

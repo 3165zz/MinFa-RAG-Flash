@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ===== 本地临时学习/草稿，不上传 =====
+以战代学-临时/
+学习路径-临时/
+切民法典-临时.py
