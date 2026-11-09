@@ -88,7 +88,7 @@ flowchart TD
 
 | 环节 | 选型 | 理由 |
 |---|---|---|
-| LLM | qwen3.5-flash | 成本极低 |
+| LLM | qwen3.7-flash | 成本低 |
 | 向量模型 | qwen3.7-text-embedding-flash | 轻量高效、支持128K长文本、性能接近 text-embedding-v4 |
 | 向量库 | FAISS | 单机够用，轻量高效 |
 | 文本切分 | 按「条」切分 | 法条天然是分块单位，检索质量高一档 |
