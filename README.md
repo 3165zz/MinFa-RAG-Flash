@@ -1,5 +1,3 @@
-Because of limited time, I won't write the English version of the README for now.
-
 # MinFa-RAG-Flash
 
 基于检索增强生成（RAG）的轻量《民法典》问答系统。用自然语言提问，得到引用具体法条的专业回答。
@@ -27,8 +25,6 @@ Because of limited time, I won't write the English version of the README for now
 后续会用同一套评测题集，对 Flash 模型与旗舰模型做横向对比，评测结果将发布在「性能指标」一节。
 
 ## 🚀 快速开始
-
-> ⚠️ 开发中，以下为预期使用方式（功能完成后生效）。
 
 ### 环境要求
 
@@ -92,21 +88,19 @@ flowchart TD
 
 | 环节 | 选型 | 理由 |
 |---|---|---|
-| LLM | 某 Flash 型　LLM | 高性价比API |
-| 向量模型 | BAAI / bge-small-zh-v1.5 | 中文效果好，模型小，CPU 即可运行 |
+| LLM | qwen3.5-flash | 成本极低 |
+| 向量模型 | qwen3.7-text-embedding-flash | 轻量高效、支持128K长文本、性能接近 text-embedding-v4 |
 | 向量库 | FAISS | 单机够用，轻量高效 |
 | 文本切分 | 按「条」切分 | 法条天然是分块单位，检索质量高一档 |
 | 后端服务 | FastAPI | 契合 REST API 集成需求，自动生成接口文档 |
-| 评测（计划） | 自建题集 + Flash/旗舰横向对比 | 用数据验证核心课题 |
-| 应用框架（v3 起引入） | LangChain / LangGraph | 先裸写原理、再用框架重构，v5 用于 Multi-Agent 编排 |
+| 评测 | 自建题集 + Flash/旗舰横向对比 | 用数据验证核心课题 |
+| 应用框架 | LangChain / LangGraph | 先裸写原理、再用框架重构 |
 | 前端 | React + Vite | 组件生态成熟，流式对话界面开发效率高 |
 | 对话存储 | SQLite | 单文件零配置，v2 起持久化对话历史，可平滑升级 PostgreSQL |
 | 检索缓存 | 进程内 LRU | 重复/高频问题直接命中，跳过向量检索 |
 
 
 ## 📊 性能指标
-
-⚠️ 项目开发中。本节先固定**评测设计**，实测数据将于 v4 评测完成后填充。
 
 ### 消融实验设计
 
@@ -146,16 +140,20 @@ flowchart TD
 
 ### 实测结果
 
-（v4 填充：命中率 / MRR / 四组得分对比）
+（空）
+
+## RAGAS
+
+（空）
 
 ## 🧭 Roadmap
 
-- [ ] **v1 核心链路**：命令行问答跑通（切分 → 向量化 → 检索 → 生成）
-- [ ] **v2 服务化**：FastAPI 后端 + SSE 流式接口 + React 对话前端（流式输出、法条引用高亮）+ 对话历史 SQLite 持久化
-- [ ] **v3 效果与性能优化**：查询改写、混合检索（BM25 + 向量）、重排序；检索结果 LRU 缓存（命中免检索）；引入 LangChain 重构检索链
+- [ ] **核心链路**：命令行问答跑通（按「条」切分 → 向量化 → FAISS 检索 → 生成）
+- [ ] **评测验证**：自建 50+ 题集（事实检索型 / 法条推理型 / 跨条文综合型），完成 Flash 与旗舰模型的四组消融实验，产出 Top-5 命中率、MRR、回答质量得分与成本报告，回填「性能指标」一节
+- [ ] **Agent 化**：基于 LangGraph 将法条检索封装为工具，补充条文关联查询、诉讼时效推算等工具，并暴露为 MCP Server；按题型选择 ReAct / Plan&Execute 范式，重点提升「跨条文综合型」问题的准确率
+- [ ] **服务化与部署**：FastAPI + SSE 流式接口、SQLite 对话历史持久化；先以 Streamlit 提供可在线访问的 Demo，React 前端作为后续增强
+- [ ] **效果与性能优化**：查询改写、混合检索、重排序、检索结果 LRU 缓存
 
-- [ ] **v4 评测验证**：自建评测题集，Flash vs 旗舰模型横向对比，产出性能报告
-- [ ] **v5 Agent 化**（未确定）：基于 LangGraph 将 RAG 封装为工具，接入 Multi-Agent 系统（这可能是我下一个项目的方向）
 
 ## 🤝 贡献
 
