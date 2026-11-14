@@ -217,5 +217,5 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# ===== 本地临时学习/草稿，不上传 =====
+# ===== 本地草稿，不上传 =====
 临时文件/

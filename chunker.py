@@ -19,7 +19,7 @@ chunker.py — MinFa-RAG-Flash 阶段 1：语料切分脚本
     data/chunks.json —— 一个 JSON 文件，结构为：
     {
       "chunks": [
-        {"id": "第一条", "book": "第一编　总则", "chapter": "第一章　基本规定", "text": "【立法目的】..."},
+        {"id": "第一条", "book": "第一编　总则", "subbook": "", "chapter": "第一章　基本规定", "text": "【立法目的】..."},
         ...
       ]
     }
@@ -31,13 +31,20 @@ chunker.py — MinFa-RAG-Flash 阶段 1：语料切分脚本
       如果不锚定行首 + "- " 前缀，裸正则 findall 会把这些引用也当成新条文。
       之前实测第三编会多出 7 条假阳性（533 vs 真实的 526）。
 
-规则 2：非空、又不匹配任何规则的裸行 → 是上一条的续行，拼接到当前块 text 末尾。
+规则 2：非空、又不匹配任何规则的裸行 → 是上一条的续行（即该条的下一“款”），
+    用换行符 "\n" 拼接到当前块 text 末尾。
     → 防的坑：多段条文（如第 1165 条有两款）的第二款起在源文件里没有 "- " 前缀，
       是"裸行"。如果不合并，这些内容就会丢失或变成无主碎片。
+    → 为什么用 "\n" 而不是直接相连：法律引用讲究"第X条第Y款"，款与款的边界
+      必须保留。直接相接会把多款揉成一段，丢掉款边界，影响 LLM 引用和人工核对。
 
-规则 3：frontmatter 和所有 # 开头的标题行跳过，但记录 ## 编名和 ### 章名。
+规则 3：frontmatter 和所有 # 开头的标题行跳过，但提取编/分编/章作为元数据。
+    → 编名(book)：直接取 frontmatter 里的 book 字段，整编恒定。这样文末的
+      "## 附则" 不会被误当成编名（否则最后两条的出处会变成"附则·第十章…"）。
+    → 分编(subbook)：合同编/物权编有"第X分编"，它和"章"都用 ### 标记，
+      靠是否含"分编"二字区分，单独存入 subbook，遇到新分编把章重置。
+    → 章名(chapter)：### 里不含"分编"的即章名；遇到附则/新分编时重置为空。
     → 防的坑：标题行不是法条内容，混入 chunk 会污染检索结果。
-      但编/章信息是有用的元数据（方便后续按编过滤、给用户展示出处）。
 
 规则 4：【主旨标题】保留在 text 里，不删。
     → 防的坑：主旨标题是条文的"摘要"，包含关键法律术语（如"过错责任原则"），
@@ -114,7 +121,7 @@ def parse_file(filepath):
 
     返回：
         list of dict，每个 dict 形如：
-        {"id": "第一条", "book": "第一编　总则", "chapter": "第一章　基本规定", "text": "【立法目的】..."}
+        {"id": "第一条", "book": "第一编　总则", "subbook": "", "chapter": "第一章　基本规定", "text": "【立法目的】..."}
     """
 
     # ---------- 第一步：读取文件全部内容 ----------
@@ -129,8 +136,10 @@ def parse_file(filepath):
 
     # ---------- 第二步：初始化状态变量 ----------
     chunks = []           # 存放本文件解析出的所有 chunk
-    current_book = ""     # 当前所属"编"（从 ## 标题行提取）
-    current_chapter = ""  # 当前所属"章"（从 ### 标题行提取）
+    file_book = ""        # 本文件的编名，从 frontmatter 的 book 字段读取（整编恒定）
+    current_book = ""     # 当前所属"编"（frontmatter 处理完后设为 file_book）
+    current_subbook = ""  # 当前所属"分编"（合同编/物权编才有，从含"分编"的 ### 标题提取）
+    current_chapter = ""  # 当前所属"章"（从不含"分编"的 ### 标题提取）
     current_chunk = None  # 当前正在构建的 chunk（遇到续行时往里追加文本）
 
     # frontmatter 状态机：文件开头两个 "---" 之间的内容要跳过
@@ -153,22 +162,39 @@ def parse_file(filepath):
                     # 遇到第二个 "---"，frontmatter 结束
                     in_frontmatter = False
                     frontmatter_done = True
+                    # 编名以 frontmatter 的 book 字段为准，整编恒定，
+                    # 后面不再被任何 ## 标题（尤其是"## 附则"）覆盖。
+                    current_book = file_book
                     continue
             if in_frontmatter:
-                # 在 frontmatter 内部的行，直接跳过
+                # 在 frontmatter 内部：只挑出 book 字段记下，其余行跳过
+                if line.startswith("book:"):
+                    file_book = line[len("book:"):].strip()
                 continue
 
         # ===== 处理标题行（规则 3）=====
         # 所有以 "#" 开头的行都是 Markdown 标题，不是法条内容，需要跳过。
-        # 但我们要从中提取编名和章名作为元数据。
+        # 但我们要从中提取分编名和章名作为元数据（编名已用 frontmatter 的 book）。
         if line.startswith("#"):
             if line.startswith("## ") and not line.startswith("### "):
-                # "## 第一编　总则" → 提取 "第一编　总则" 作为编名
-                # 注意：必须先判断 "## " 且不是 "### "，因为 "###" 也以 "##" 开头
-                current_book = line[3:]  # 去掉 "## " 三个字符
+                # "## " 级别有两种："## 第X编 …"（主编标题）和文末的 "## 附则"。
+                # 注意：必须先判断 "## " 且不是 "### "，因为 "###" 也以 "##" 开头。
+                # 编名不从这里取（已用 frontmatter 的 book，恒定不变），
+                # 否则 "## 附则" 会把最后两条的编名误改成"附则"。
+                # 无论主编还是附则，都代表进入新的顶层区块，分编/章一律重置。
+                current_subbook = ""
+                current_chapter = ""
             elif line.startswith("### ") and not line.startswith("#### "):
-                # "### 第一章　基本规定" → 提取 "第一章　基本规定" 作为章名
-                current_chapter = line[4:]  # 去掉 "### " 四个字符
+                # "### " 级别混着两种："第X分编 …"（分编）和 "第X章 …"（章）。
+                title = line[4:].strip()  # 去掉 "### " 四个字符
+                if "分编" in title:
+                    # 分编是"编"之下、"章"之上的一层（仅合同编/物权编有）。
+                    # 单独存进 subbook，不能当成章；进入新分编时把章重置。
+                    current_subbook = title
+                    current_chapter = ""
+                else:
+                    # 不含"分编"的就是章名，如 "第一章　基本规定"
+                    current_chapter = title
             # "# 书名" 和 "#### 节名" 直接跳过，不记录
             # （节是章下面的细分，v1 不需要这层元数据）
             continue
@@ -193,9 +219,12 @@ def parse_file(filepath):
             article_text = line[match.end():]
 
             # 创建新的 chunk 字典
+            # 元数据按层级排列：编(book) > 分编(subbook) > 章(chapter)。
+            # 没有分编的编（如总则编），subbook 为空字符串。
             current_chunk = {
                 "id": article_id,
                 "book": current_book,
+                "subbook": current_subbook,
                 "chapter": current_chapter,
                 "text": article_text,
             }
@@ -203,13 +232,14 @@ def parse_file(filepath):
 
         # ===== 处理续行（规则 2）=====
         # 走到这里说明：这一行不是 frontmatter、不是标题、也不是新条文起始。
-        # 如果它不是空行，那就是上一条法条的续行（多段条文的第二段及之后）。
+        # 如果它不是空行，那就是上一条法条的续行，也就是该条的下一"款"。
         if line.strip() != "":
-            # 有实际内容的裸行 → 拼接到当前 chunk 的 text 末尾
-            # 为什么直接相连不加空格：中文文本不需要空格分词，
-            # 法条的段与段之间本来就没有分隔符（它们在原文里就是连续的）。
+            # 有实际内容的裸行 → 用换行符 "\n" 拼接到当前 chunk 的 text 末尾。
+            # 为什么用 "\n" 而不是直接相连：源文件里每一款各占一行，款与款之间
+            # 本就有分段边界。法律引用讲究"第X条第Y款"，必须把这个边界保留下来，
+            # 否则多款会被揉成一段，LLM 引用和人工核对都没法定位到具体的款。
             if current_chunk is not None:
-                current_chunk["text"] = current_chunk["text"] + line.strip()
+                current_chunk["text"] = current_chunk["text"] + "\n" + line.strip()
             # 如果 current_chunk 是 None（理论上不会发生，除非文件格式异常），
             # 则忽略这行。这是一种防御性编程。
 
