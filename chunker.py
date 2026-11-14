@@ -19,7 +19,7 @@ chunker.py — MinFa-RAG-Flash 阶段 1：语料切分脚本
     data/chunks.json —— 一个 JSON 文件，结构为：
     {
       "chunks": [
-        {"id": "第一条", "book": "第一编　总则", "subbook": "", "chapter": "第一章　基本规定", "text": "【立法目的】..."},
+        {"article_no": 1, "id": "第一条", "book": "第一编　总则", "subbook": "", "chapter": "第一章　基本规定", "source_file": "民法典-第一编-总则.md", "text": "【立法目的】..."},
         ...
       ]
     }
@@ -52,7 +52,6 @@ chunker.py — MinFa-RAG-Flash 阶段 1：语料切分脚本
 """
 
 import json
-import os
 import re
 from pathlib import Path
 
@@ -93,19 +92,61 @@ ARTICLE_PATTERN = re.compile(r"^- 第([一二三四五六七八九十百千零]+
 
 
 # ============================================================
-# 文件处理顺序
+# 中文数字 → 整数
 # ============================================================
-# 按照民法典的编排顺序处理，这样输出的 chunks.json 里条文是有序的。
+# 条号在语料里是中文数字（如"一千一百六十五"），但范围查询/排序需要整数。
+# 民法典最大条号 1260，不涉及"万"，算法可以很简单：
+#   从左到右扫描，current 记"当前累加的数字"，total 记"已结算的部分"。
+#   遇到数字（一~九）→ 记到 current；遇到单位（十/百/千）→ 把 current×单位
+#   结算进 total 并清零 current；"十"前没有数字时按 1 算（"十"=10，"二十"=20）。
+#   例："一千二百六十" → 1×1000 + 2×100 + 6×10 = 1260。
 
-FILE_ORDER = [
-    "民法典-第一编-总则.md",
-    "民法典-第二编-物权.md",
-    "民法典-第三编-合同.md",
-    "民法典-第四编-人格权.md",
-    "民法典-第五编-婚姻家庭.md",
-    "民法典-第六编-继承.md",
-    "民法典-第七编-侵权责任.md",
-]
+CN_DIGITS = {"零": 0, "一": 1, "二": 2, "三": 3, "四": 4,
+             "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+CN_UNITS = {"十": 10, "百": 100, "千": 1000}
+
+
+def cn_to_int(text):
+    """把中文数字字符串转成整数（覆盖 1~1260，无需处理'万'）。"""
+    total = 0
+    current = 0
+    for ch in text:
+        if ch in CN_DIGITS:
+            current = CN_DIGITS[ch]
+        elif ch in CN_UNITS:
+            if current == 0:
+                current = 1  # "十"单独出现时按 1×10 算
+            total = total + current * CN_UNITS[ch]
+            current = 0
+    return total + current
+
+
+# ============================================================
+# 语料文件发现与排序
+# ============================================================
+# 不再硬编码文件名清单（旧写法的隐患：新增"第八编"或改名都要同步改代码）。
+# 改为：glob 扫描 corpus/ 下所有 .md，再按文件名里的"第X编"编号排序。
+# 这样无论文件名怎么变、有几编，都能自动适应，且输出条文有序。
+
+BOOK_NUM_PATTERN = re.compile(r"第([一二三四五六七八九十百千零]+)编")
+
+
+def _book_sort_key(filepath):
+    """排序键：从文件名提取"第X编"的编号转成整数；提取不到的排到最后。"""
+    match = BOOK_NUM_PATTERN.search(filepath.name)
+    if match:
+        return cn_to_int(match.group(1))
+    return 9999
+
+
+def list_corpus_files():
+    """返回按编序排好的语料文件列表；目录不存在或没有 md 文件时直接报错。"""
+    if not CORPUS_DIR.exists():
+        raise FileNotFoundError(f"语料目录不存在：{CORPUS_DIR}")
+    files = list(CORPUS_DIR.glob("*.md"))
+    if len(files) == 0:
+        raise FileNotFoundError(f"语料目录里没有 .md 文件：{CORPUS_DIR}")
+    return sorted(files, key=_book_sort_key)
 
 
 # ============================================================
@@ -121,7 +162,7 @@ def parse_file(filepath):
 
     返回：
         list of dict，每个 dict 形如：
-        {"id": "第一条", "book": "第一编　总则", "subbook": "", "chapter": "第一章　基本规定", "text": "【立法目的】..."}
+        {"article_no": 1, "id": "第一条", "book": "第一编　总则", "subbook": "", "chapter": "第一章　基本规定", "source_file": "民法典-第一编-总则.md", "text": "【立法目的】..."}
     """
 
     # ---------- 第一步：读取文件全部内容 ----------
@@ -134,43 +175,35 @@ def parse_file(filepath):
     # 并且不会在最后一行多加一个空字符串（比 split("\n") 更安全）。
     lines = content.splitlines()
 
-    # ---------- 第二步：初始化状态变量 ----------
+    # ---------- 第二步：剥离 frontmatter，取出编名 ----------
+    # frontmatter 是文件最开头被两个 "---" 包围的 YAML 元数据块（title/passed/book）。
+    # 关键：只有"第一行就是 ---"才认定存在 frontmatter。这样即使正文里出现 ---
+    # 分隔线，也不会被误判成 frontmatter 开头、把后面内容整段吞掉（旧写法的隐患）。
+    file_book = ""
+    if len(lines) > 0 and lines[0].strip() == "---":
+        # 从第二行起找闭合的 "---"
+        close_index = -1
+        for i in range(1, len(lines)):
+            if lines[i].strip() == "---":
+                close_index = i
+                break
+        if close_index != -1:
+            # 在 frontmatter 区间里挑出 book 字段（编名以此为准，整编恒定）
+            for fm_line in lines[1:close_index]:
+                if fm_line.startswith("book:"):
+                    file_book = fm_line[len("book:"):].strip()
+            # 丢掉 frontmatter，只把正文留给下面的主循环
+            lines = lines[close_index + 1:]
+
+    # ---------- 第三步：初始化状态变量 ----------
     chunks = []           # 存放本文件解析出的所有 chunk
-    file_book = ""        # 本文件的编名，从 frontmatter 的 book 字段读取（整编恒定）
-    current_book = ""     # 当前所属"编"（frontmatter 处理完后设为 file_book）
+    current_book = file_book  # 当前所属"编"（取自 frontmatter，整编恒定，不被标题覆盖）
     current_subbook = ""  # 当前所属"分编"（合同编/物权编才有，从含"分编"的 ### 标题提取）
     current_chapter = ""  # 当前所属"章"（从不含"分编"的 ### 标题提取）
     current_chunk = None  # 当前正在构建的 chunk（遇到续行时往里追加文本）
 
-    # frontmatter 状态机：文件开头两个 "---" 之间的内容要跳过
-    in_frontmatter = False
-    frontmatter_done = False  # 标记 frontmatter 是否已经处理完毕
-
-    # ---------- 第三步：逐行扫描 ----------
+    # ---------- 第四步：逐行扫描正文 ----------
     for line in lines:
-
-        # ===== 处理 frontmatter（规则 3 的一部分）=====
-        # frontmatter 是文件最开头被两个 "---" 包围的 YAML 元数据块。
-        # 它包含 title/passed/book 三个字段，是给文档管理用的，不是法条内容。
-        if not frontmatter_done:
-            if line.strip() == "---":
-                if not in_frontmatter:
-                    # 遇到第一个 "---"，进入 frontmatter 区域
-                    in_frontmatter = True
-                    continue
-                else:
-                    # 遇到第二个 "---"，frontmatter 结束
-                    in_frontmatter = False
-                    frontmatter_done = True
-                    # 编名以 frontmatter 的 book 字段为准，整编恒定，
-                    # 后面不再被任何 ## 标题（尤其是"## 附则"）覆盖。
-                    current_book = file_book
-                    continue
-            if in_frontmatter:
-                # 在 frontmatter 内部：只挑出 book 字段记下，其余行跳过
-                if line.startswith("book:"):
-                    file_book = line[len("book:"):].strip()
-                continue
 
         # ===== 处理标题行（规则 3）=====
         # 所有以 "#" 开头的行都是 Markdown 标题，不是法条内容，需要跳过。
@@ -218,14 +251,20 @@ def parse_file(filepath):
             # match.end() 返回正则匹配结束的字符位置，从那之后就是正文（含【主旨标题】）
             article_text = line[match.end():]
 
+            # 条号转成整数，便于范围查询/排序（id 仍是中文数字字符串，供展示）
+            article_no = cn_to_int(article_number)
+
             # 创建新的 chunk 字典
             # 元数据按层级排列：编(book) > 分编(subbook) > 章(chapter)。
             # 没有分编的编（如总则编），subbook 为空字符串。
+            # source_file 记录来源 md 文件名，便于溯源。
             current_chunk = {
+                "article_no": article_no,
                 "id": article_id,
                 "book": current_book,
                 "subbook": current_subbook,
                 "chapter": current_chapter,
+                "source_file": filepath.name,
                 "text": article_text,
             }
             continue
@@ -246,7 +285,7 @@ def parse_file(filepath):
         # 空行（line.strip() == ""）→ 什么都不做，直接跳过。
         # 空行在 Markdown 里是段落分隔符，不携带任何法条内容。
 
-    # ---------- 第四步：别忘了最后一条 ----------
+    # ---------- 第五步：别忘了最后一条 ----------
     # 循环结束后，最后一条 chunk 还暂存在 current_chunk 里，需要追加进列表。
     # 这是一个经典的"边界条件"——新手容易忘记处理循环外的最后一条数据。
     if current_chunk is not None:
@@ -259,14 +298,26 @@ def parse_file(filepath):
 # 主函数：遍历文件、汇总结果、写入 JSON
 # ============================================================
 
+def parse_corpus():
+    """
+    按编序解析全部语料文件，汇总成一个 chunk 列表。
+    单独抽出来是为了复用：main() 写 JSON、测试、validate.py 都调它，
+    保证"大家用的是同一套切分逻辑"。
+    """
+    all_chunks = []
+    for filepath in list_corpus_files():
+        file_chunks = parse_file(filepath)
+        all_chunks = all_chunks + file_chunks
+    return all_chunks
+
+
 def main():
     """
     主流程：
-    1. 检查 corpus/ 目录是否存在
-    2. 按顺序解析 7 个 md 文件
-    3. 打印每个文件的块数（方便肉眼核对）
-    4. 把所有块汇总，写入 data/chunks.json
-    5. 打印首尾块的预览信息（快速验证切分是否正确）
+    1. 解析全部语料（目录缺失/无文件会直接报错，而非静默跳过）
+    2. 打印每个文件的块数与总数（方便肉眼核对）
+    3. 打印首尾块预览
+    4. 写入 data/chunks.json
     """
 
     print("=" * 60)
@@ -274,31 +325,23 @@ def main():
     print("=" * 60)
     print()
 
-    # --- 检查语料目录是否存在 ---
-    if not CORPUS_DIR.exists():
-        print(f"[错误] 语料目录不存在：{CORPUS_DIR}")
-        print("请确认 corpus/ 目录在项目根目录下，且包含 7 个 .md 文件。")
-        return
+    # --- 解析全部语料 ---
+    # 文件缺失/目录为空会在 list_corpus_files() 里抛错，
+    # 而不是像旧写法那样打印警告后跳过——避免"少了一编却没发现"。
+    all_chunks = parse_corpus()
 
-    # --- 逐个文件解析 ---
-    all_chunks = []  # 汇总所有文件的 chunk
+    # --- 统计并打印每个文件的块数 ---
+    # 用一个字典累计各文件的条数（source_file → 条数）
+    count_by_file = {}
+    for chunk in all_chunks:
+        name = chunk["source_file"]
+        if name not in count_by_file:
+            count_by_file[name] = 0
+        count_by_file[name] = count_by_file[name] + 1
 
-    for filename in FILE_ORDER:
-        filepath = CORPUS_DIR / filename
-
-        # 检查文件是否存在
-        if not filepath.exists():
-            print(f"[警告] 文件不存在，跳过：{filename}")
-            continue
-
-        # 调用 parse_file 解析这个文件
-        file_chunks = parse_file(filepath)
-
-        # 打印这个文件的块数
-        print(f"  {filename}  →  {len(file_chunks)} 条")
-
-        # 把本文件的块追加到总列表
-        all_chunks = all_chunks + file_chunks
+    for filepath in list_corpus_files():
+        count = count_by_file.get(filepath.name, 0)
+        print(f"  {filepath.name}  ->  {count} 条")
 
     # --- 打印汇总信息 ---
     print()
@@ -306,21 +349,24 @@ def main():
     print()
 
     # --- 首尾块预览（方便用户肉眼自检）---
+    # 预览标记用 ASCII 的 -- 和 [OK]，不用 ── / ✓ 等特殊符号，
+    # 否则在中文 Windows 把输出重定向到文件（GBK 编码）时可能抛 UnicodeEncodeError。
     if len(all_chunks) > 0:
         first = all_chunks[0]
         last = all_chunks[-1]
-        print("  ── 首块预览 ──")
+        print("  -- 首块预览 --")
         print(f"  id   : {first['id']}")
         print(f"  text : {first['text'][:40]}...")
         print()
-        print("  ── 末块预览 ──")
+        print("  -- 末块预览 --")
         print(f"  id   : {last['id']}")
         print(f"  text : {last['text'][:40]}...")
         print()
 
     # --- 写入 JSON 文件 ---
-    # 如果 data/ 目录不存在就创建它（exist_ok=True 表示已存在也不报错）
-    os.makedirs(DATA_DIR, exist_ok=True)
+    # 如果 data/ 目录不存在就创建它（parents=True 允许连带创建父目录，
+    # exist_ok=True 表示已存在也不报错）。用 Path.mkdir 与全文 Path 风格统一。
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     # 构建输出数据结构
     output_data = {
@@ -333,7 +379,7 @@ def main():
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         json.dump(output_data, f, ensure_ascii=False, indent=2)
 
-    print(f"  ✓ 已写入：{OUTPUT_FILE}")
+    print(f"  [OK] 已写入：{OUTPUT_FILE}")
     print()
 
 
